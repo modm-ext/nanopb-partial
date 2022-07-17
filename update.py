@@ -15,6 +15,7 @@ def sort_version(version: str):
 source_paths = [
     "LICENSE.txt",
     "generator/**/*",
+    "tests/site_scons/site_tools/nanopb.py",
     "pb.h",
     "pb_common.h",
     "pb_common.c",
@@ -54,6 +55,6 @@ for pattern in source_paths:
                            dest.open("w", encoding="utf-8") as wfile:
             wfile.writelines(l.rstrip()+"\n" for l in rfile.readlines())
 
-subprocess.run("git add pb.h pb_common.h pb_common.c pb_decode.h pb_decode.c pb_encode.h pb_encode.c LICENSE.txt generator", shell=True)
+subprocess.run("git add pb.h pb_common.h pb_common.c pb_decode.h pb_decode.c pb_encode.h pb_encode.c LICENSE.txt generator tests", shell=True)
 if subprocess.call("git diff-index --quiet HEAD --", shell=True):
     subprocess.run('git commit -m "Update nanopb to {}"'.format(tag), shell=True)
