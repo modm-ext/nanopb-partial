@@ -56,5 +56,6 @@ for pattern in source_paths:
             wfile.writelines(l.rstrip()+"\n" for l in rfile.readlines())
 
 subprocess.run("git add pb.h pb_common.h pb_common.c pb_decode.h pb_decode.c pb_encode.h pb_encode.c LICENSE.txt generator tests", shell=True)
+subprocess.run("git update-index --chmod=+x generator/protoc generator/protoc-gen-nanopb generator/nanopb_generator.py", shell=True)
 if subprocess.call("git diff-index --quiet HEAD --", shell=True):
     subprocess.run('git commit -m "Update nanopb to {}"'.format(tag), shell=True)
