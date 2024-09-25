@@ -4,7 +4,7 @@
 from __future__ import unicode_literals
 
 '''Generate header file for nanopb from a ProtoBuf FileDescriptorSet.'''
-nanopb_version = "nanopb-0.4.8"
+nanopb_version = "nanopb-0.4.9"
 
 import sys
 import re
@@ -62,7 +62,8 @@ if getattr(sys, 'frozen', False):
     # Binary package, just import the file
     from proto import nanopb_pb2
 else:
-    # Try to rebuild nanopb_pb2.py if necessary
+    # Import nanopb_pb2.py, rebuilds if necessary and not disabled
+    # by env variable NANOPB_PB2_NO_REBUILD
     nanopb_pb2 = proto.load_nanopb_pb2()
 
 try:
@@ -436,14 +437,11 @@ class Enum(ProtoElement):
         result += 'typedef enum %s' % Globals.naming_style.enum_name(self.names)
 
         # Override the enum size if user wants to use smaller integers
-        if (FieldD.TYPE_ENUM, self.options.int_size) in datatypes:
-            self.ctype, self.pbtype, self.enc_size, self.data_item_size = datatypes[(FieldD.TYPE_ENUM, self.options.int_size)]
-            result += '\n#ifdef __cplusplus\n'
-            result += ' : ' + self.ctype + '\n'
-            result += '#endif\n'
-            result += '{'
-        else:
-            result += ' {'
+        if (FieldD.TYPE_ENUM, self.options.enum_intsize) in datatypes:
+            self.ctype, self.pbtype, self.enc_size, self.data_item_size = datatypes[(FieldD.TYPE_ENUM, self.options.enum_intsize)]
+            result += ': ' + self.ctype
+
+        result += ' {'
 
         if trailing_comment:
             result += " " + trailing_comment
@@ -519,6 +517,11 @@ class Enum(ProtoElement):
                 Globals.naming_style.func_name('%s_name' % self.names),
                 Globals.naming_style.type_name(self.names))
 
+        if self.options.enum_validate:
+            result += 'bool %s(%s v);\n' % (
+                Globals.naming_style.func_name('%s_valid' % self.names),
+                Globals.naming_style.type_name(self.names))
+
         return result
 
     def enum_to_string_definition(self):
@@ -543,6 +546,28 @@ class Enum(ProtoElement):
         result += '}\n'
 
         return result
+
+    def enum_validate(self):
+        if not self.options.enum_validate:
+            return ""
+
+        result = 'bool %s(%s v) {\n' % (
+            Globals.naming_style.func_name('%s_valid' % self.names),
+            Globals.naming_style.type_name(self.names))
+
+        result += '    switch (v) {\n'
+
+        for (enumname, _) in self.values:
+            result += '        case %s: return true;\n' % (
+                Globals.naming_style.enum_entry(enumname)
+                )
+
+        result += '    }\n'
+        result += '    return false;\n'
+        result += '}\n'
+
+        return result
+
 
 class FieldMaxSize:
     def __init__(self, worst = 0, checks = [], field_name = 'undefined'):
@@ -614,6 +639,9 @@ class Field(ProtoElement):
             self.default = desc.default_value
 
         # Check field rules, i.e. required/optional/repeated.
+        if field_options.HasField("label_override"):
+            desc.label = field_options.label_override
+
         can_be_static = True
         if desc.label == FieldD.LABEL_REPEATED:
             self.rules = 'REPEATED'
@@ -624,6 +652,9 @@ class Field(ProtoElement):
                 if field_options.fixed_count:
                   self.rules = 'FIXARRAY'
 
+        elif desc.label == FieldD.LABEL_REQUIRED:
+            # We allow LABEL_REQUIRED using label_override even for proto3 (see #962)
+            self.rules = 'REQUIRED'
         elif field_options.proto3:
             if desc.type == FieldD.TYPE_MESSAGE and not field_options.proto3_singular_msgs:
                 # In most other protobuf libraries proto3 submessages have
@@ -635,8 +666,6 @@ class Field(ProtoElement):
             else:
                 # Proto3 singular fields (without has_field)
                 self.rules = 'SINGULAR'
-        elif desc.label == FieldD.LABEL_REQUIRED:
-            self.rules = 'REQUIRED'
         elif desc.label == FieldD.LABEL_OPTIONAL:
             self.rules = 'OPTIONAL'
         else:
@@ -1313,7 +1342,11 @@ class Message(ProtoElement):
 
         for index, f in enumerate(desc.field):
             field_options = get_nanopb_suboptions(f, message_options, self.name + f.name)
+
             if field_options.type == nanopb_pb2.FT_IGNORE:
+                continue
+
+            if field_options.discard_deprecated and f.options.deprecated:
                 continue
 
             if field_options.descriptorsize > self.descriptorsize:
@@ -1518,12 +1551,23 @@ class Message(ProtoElement):
 
         return result
 
-    def fields_declaration_cpp_lookup(self):
+    def fields_declaration_cpp_lookup(self, local_defines):
         result = 'template <>\n'
         result += 'struct MessageDescriptor<%s> {\n' % (self.name)
         result += '    static PB_INLINE_CONSTEXPR const pb_size_t fields_array_length = %d;\n' % (self.count_all_fields())
+
+        size_define = "%s_size" % (self.name)
+        if size_define in local_defines:
+            result += '    static PB_INLINE_CONSTEXPR const pb_size_t size = %s;\n' % (size_define)
+
         result += '    static inline const pb_msgdesc_t* fields() {\n'
         result += '        return &%s_msg;\n' % (self.name)
+        result += '    }\n'
+        result += '    static inline bool has_msgid() {\n'
+        result += '        return %s;\n' % ("true" if hasattr(self, "msgid") else "false", )
+        result += '    }\n'
+        result += '    static inline uint32_t msgid() {\n'
+        result += '        return %d;\n' % (getattr(self, "msgid", 0), )
         result += '    }\n'
         result += '};'
         return result
@@ -1843,6 +1887,7 @@ class ProtoFile:
         self.dependencies = {}
         self.math_include_required = False
         self.parse()
+        self.discard_unused_automatic_types()
         for message in self.messages:
             if message.math_include_required:
                 self.math_include_required = True
@@ -1879,6 +1924,9 @@ class ProtoFile:
             if message_options.skip_message:
                 continue
 
+            if message_options.discard_deprecated and message.options.deprecated:
+                continue
+
             # Apply any configured typename mangling options
             message = copy.deepcopy(message)
             for field in message.field:
@@ -1888,8 +1936,9 @@ class ProtoFile:
             # Check for circular dependencies
             msgobject = Message(name, message, message_options, comment_path, self.comment_locations)
             if check_recursive_dependencies(msgobject, self.messages):
-                sys.stderr.write('Breaking circular dependency at message %s by converting to callback\n' % msgobject.name)
-                message_options.type = nanopb_pb2.FT_CALLBACK
+                message_options.type = message_options.fallback_type
+                sys.stderr.write('Breaking circular dependency at message %s by converting to %s\n'
+                                 % (msgobject.name, nanopb_pb2.FieldType.Name(message_options.type)))
                 msgobject = Message(name, message, message_options, comment_path, self.comment_locations)
             self.messages.append(msgobject)
 
@@ -1910,6 +1959,28 @@ class ProtoFile:
 
             if field_options.type != nanopb_pb2.FT_IGNORE:
                 self.extensions.append(ExtensionField(name, extension, field_options))
+
+    def discard_unused_automatic_types(self):
+        '''Discard unused types that are automatically generated by protoc if they are not actually
+        needed. Currently this applies to map< > types when the field is ignored by options.
+        '''
+
+        if not self.file_options.discard_unused_automatic_types:
+            return
+
+        map_entries = {}
+        types_used = set()
+        for msg in self.messages:
+            if msg.desc.options.map_entry:
+                map_entries[str(msg.name)] = msg
+
+            for field in msg.all_fields():
+                if field.pbtype == 'MESSAGE':
+                    types_used.add(str(field.submsgname))
+
+        for name, msg in map_entries.items():
+            if name not in types_used:
+                self.messages.remove(msg)
 
     def add_dependency(self, other):
         for enum in other.enums:
@@ -2161,7 +2232,7 @@ class ProtoFile:
             yield '/* Message descriptors for nanopb */\n'
             yield 'namespace nanopb {\n'
             for msg in self.messages:
-                yield msg.fields_declaration_cpp_lookup() + '\n'
+                yield msg.fields_declaration_cpp_lookup(local_defines) + '\n'
             yield '}  // namespace nanopb\n'
             yield '\n'
             yield '#endif  /* __cplusplus */\n'
@@ -2217,6 +2288,10 @@ class ProtoFile:
         # Generate enum_name function if enum_to_string option is defined
         for enum in self.enums:
             yield enum.enum_to_string_definition() + '\n'
+
+        # Generate enum_valid function if enum_valid option is defined
+        for enum in self.enums:
+            yield enum.enum_validate() + '\n'
 
         # Add checks for numeric limits
         if self.messages:
