@@ -4,7 +4,7 @@
 from __future__ import unicode_literals
 
 '''Generate header file for nanopb from a ProtoBuf FileDescriptorSet.'''
-nanopb_version = "nanopb-0.4.9"
+nanopb_version = "nanopb-0.4.9.1"
 
 import sys
 import re
@@ -34,8 +34,8 @@ try:
     import google.protobuf.text_format as text_format
     import google.protobuf.descriptor_pb2 as descriptor
     import google.protobuf.compiler.plugin_pb2 as plugin_pb2
-    import google.protobuf.reflection as reflection
     import google.protobuf.descriptor
+    import google.protobuf.message_factory as message_factory
 except:
     sys.stderr.write('''
          **********************************************************************
@@ -46,6 +46,15 @@ except:
          **********************************************************************
     ''' + '\n')
     raise
+
+# GetMessageClass() is used by modern python-protobuf (around 5.x onwards)
+# Retain compatibility with older python-protobuf versions.
+try:
+    import google.protobuf.message_factory as message_factory
+    GetMessageClass = message_factory.GetMessageClass
+except AttributeError:
+    import google.protobuf.reflection as reflection
+    GetMessageClass = reflection.MakeClass
 
 # Depending on how this script is run, we may or may not have PEP366 package name
 # available for relative imports.
@@ -887,6 +896,8 @@ class Field(ProtoElement):
                     inner_init += '.0f'
                 elif self.pbtype == 'FLOAT':
                     inner_init += 'f'
+            elif self.pbtype in ('ENUM', 'UENUM'):
+                inner_init = Globals.naming_style.enum_entry(self.default)
             else:
                 inner_init = str(self.default)
 
@@ -1689,7 +1700,7 @@ class Message(ProtoElement):
         optional_only.name += str(id(self))
 
         desc = google.protobuf.descriptor.MakeDescriptor(optional_only)
-        msg = reflection.MakeClass(desc)()
+        msg = GetMessageClass(desc)()
 
         for field in optional_only.field:
             if field.type == FieldD.TYPE_STRING:
